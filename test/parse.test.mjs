@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parsePatchIds, filterCatalog, matchesQuery, summarizePlugin } from "../lib/parse.js";
+import { parsePatchIds, parsePresetPluginIds, filterCatalog, matchesQuery, summarizePlugin } from "../lib/parse.js";
 
 test("parsePatchIds reads desktop insert ids", () => {
   const text = `# comment
@@ -11,6 +11,18 @@ test("parsePatchIds reads desktop insert ids", () => {
       name: ../../plugins/bianji/lib/index.js
 `;
   assert.deepEqual(parsePatchIds(text), ["dsh-edu", "bianji"]);
+});
+
+test("parsePatchIds ignores top-level config overrides", () => {
+  const text = `- insert:
+    - id: web-search-anysearch
+      name: ./node_modules/@anysearch/anysearch-dsh/lib/index.js
+- id: web
+  config:
+    searchProvider: anysearch
+    fetchProvider: anysearch
+`;
+  assert.deepEqual(parsePatchIds(text), ["web-search-anysearch"]);
 });
 
 test("filterCatalog searches and paginates by stars", () => {
@@ -43,6 +55,19 @@ test("filterCatalog sorts by added, downloads, and name", () => {
 test("matchesQuery is case-insensitive", () => {
   assert.equal(matchesQuery({ name: "BianJi", description: "Editor" }, "bian"), true);
   assert.equal(matchesQuery({ name: "foo" }, "bar"), false);
+});
+
+test("parsePresetPluginIds reads plugins paths from a user preset", () => {
+  const text = [
+    "    - id: compaction-basic",
+    "      name: ../../plugins/yasuo/lib/index.js",
+  ].join("\n");
+  assert.deepEqual(parsePresetPluginIds(text), ["yasuo"]);
+  assert.deepEqual(
+    parsePresetPluginIds("name: /Users/ning/.dsh/plugins/yasuo/lib/index.js"),
+    ["yasuo"],
+  );
+  assert.deepEqual(parsePresetPluginIds("- insert:\n    - id: bianji\n"), []);
 });
 
 test("summarizePlugin flattens zh description", () => {
