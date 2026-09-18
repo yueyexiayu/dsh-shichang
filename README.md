@@ -1,5 +1,7 @@
 # shichang
 
+当前项目是深度适配个人使用，项目只是给大家提供思路和借鉴，尽量不要直接照搬。
+
 DeepSeek Harness 官方桌面端的只读插件市场。右侧栏「开始」页增加 **市场** 入口：查看本机 `$DSH_HOME/plugins` 已装插件，以及 [awesome-dsh-plugin](https://awesome-dsh-plugin.com/) 社区目录（搜索、分类、按评星 / 收录日期 / 下载量 / 名称排序）。
 
 **不提供安装和卸载。** 面向官方桌面（`connection.fetch`），不走 `dsh plugin --profile desktop`。
