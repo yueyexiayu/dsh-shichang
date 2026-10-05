@@ -23,11 +23,15 @@ DeepSeek Harness 官方桌面端的只读插件市场。右侧栏「开始」页
 - 社区数据来自公开的 `https://awesome-dsh-plugin.com/plugins.json`
 - 「最新收录」按目录的 `added` 字段，不是 GitHub Release 时间
 - 仓库内不含本机 patch、账号或凭据
-- 本机列表：desktop patch 里的显示「已加载」；只被用户 preset 引用的（如 `yasuo`）显示「用户 preset」，不要写进 desktop patch
+- 本机列表读取官方 `pluginInventory` 的实时状态，按模块路径关联本机目录，区分已加载、已禁用、加载失败和未加载；仅下载到 `plugins` 的目录不会被当作已加载。
+- preset 状态来自当前运行时的声明式 preset 清单，不扫描废弃的 `.agent-presets` 目录，也不会把 preset 插件当作桌面顶层插件。
+- 搜索、筛选、分页和切换页签会取消旧请求，迟到的响应不会覆盖当前结果。
+- 社区目录的普通浏览使用 15 分钟缓存；点击「刷新」会重新请求远程目录，失败会明确显示错误。
+- 控件使用桌面主题配色，窄侧栏会自动换行排列工具栏。
 
 ## 开发
 
 ```bash
-node --check lib/index.js lib/client.js lib/parse.js
+for file in lib/*.js; do node --check "$file"; done
 node --test
 ```
