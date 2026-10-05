@@ -1,6 +1,6 @@
 {
   "name": "shichang",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "DSH desktop plugin: read-only local plugin list and awesome-dsh-plugin catalog.",
   "type": "module",

@@ -175,5 +175,27 @@ test('preset scope and lifecycle remain visible beside the overall active status
     ],
   }] });
   assert.deepEqual(client.labels(), ['已加载']);
-  assert.deepEqual(client.descriptions(), ['preset · standard：已禁用；minimal：未加载']);
+  assert.deepEqual(client.descriptions(), ['桌面 Host：已加载', '预设 standard：已禁用', '预设 minimal：未加载']);
+});
+
+test('an active host instance does not hide another failed host instance', async () => {
+  const client = await mountClient();
+  await client.settle(0, { ok: true, plugins: [{
+    id: 'shared', name: 'shared', loaded: true, mixed: true, statusText: '部分运行中，另有加载失败', references: [
+      { scope: 'host', scopeLabel: '桌面 Host', statusText: 'Host 运行中', moduleName: '/plugins/shared/lib/index.js' },
+      { scope: 'host', scopeLabel: '桌面 Host', statusText: '加载失败', moduleName: '/plugins/shared/lib/broken.js' },
+    ],
+  }] });
+  assert.deepEqual(client.descriptions(), ['桌面 Host：Host 运行中', '桌面 Host：加载失败']);
+});
+
+test('retained preset runtime and current disabled declaration remain separate', async () => {
+  const client = await mountClient();
+  await client.settle(0, { ok: true, plugins: [{
+    id: 'preset', name: 'preset', loaded: true, mixed: true, statusText: '部分运行中，另有已禁用', references: [
+      { scope: 'preset', presetId: 'standard', statusText: '已禁用' },
+      { scope: 'preset-runtime', presetId: 'standard', scopeLabel: '预设 standard 运行实例 1', statusText: '运行中' },
+    ],
+  }] });
+  assert.deepEqual(client.descriptions(), ['预设 standard：已禁用', '预设 standard 运行实例 1：运行中']);
 });
