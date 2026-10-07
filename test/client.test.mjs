@@ -74,6 +74,7 @@ async function mountClient() {
   function button(label) { return all(x => x.type === 'button' && x.children.includes(label))[0]; }
   function click(label) { button(label).props.onClick(); commit(); }
   function search(value) { all(x => x.type === 'input')[0].props.onChange({ target: { value } }); commit(); }
+  function select(label, value) { all(x => x.type === 'select' && x.props['aria-label'] === label)[0].props.onChange({ target: { value } }); commit(); }
   async function settle(i, body, error) {
     if (error) requests[i].reject(error);
     else requests[i].resolve({ json: async () => body });
@@ -82,7 +83,9 @@ async function mountClient() {
   }
   commit();
   return {
-    requests, click, search, settle,
+    requests, click, search, select, settle,
+    page: () => all(x => x.type === 'span').flatMap(x => x.children).find(x => typeof x === 'string' && /^第 \d+ 页$/.test(x)),
+    empty: () => all(x => x.props.className === 'sc-empty')[0]?.children.join(''),
     cards: () => all(x => x.props.className === 'sc-name').map(x => x.children[0]),
     query: () => all(x => x.type === 'input')[0]?.props.value,
     meta: () => all(x => x.props.className === 'sc-meta')[0].children.join(''),
@@ -198,4 +201,142 @@ test('retained preset runtime and current disabled declaration remain separate',
     ],
   }] });
   assert.deepEqual(client.descriptions(), ['预设 standard：已禁用', '预设 standard 运行实例 1：运行中']);
+});
+
+test('invalid response data is a visible loading failure, never empty success or unsafe children', async t => {
+  const cases = [
+    ['missing plugins', 'installed', { ok: true }],
+    ['null plugins', 'installed', { ok: true, plugins: null }],
+    ['object plugins', 'installed', { ok: true, plugins: {} }],
+    ['null item', 'installed', { ok: true, plugins: [null] }],
+    ['array item', 'installed', { ok: true, plugins: [[]] }],
+    ['object name', 'installed', { ok: true, plugins: [{ id: 'bad', name: {} }] }],
+    ['object description', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', description: {} }] }],
+    ['array status', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', statusText: [] }] }],
+    ['object references', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', references: {} }] }],
+    ['null reference', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', references: [null] }] }],
+    ['object reference status', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', references: [{ statusText: {} }] }] }],
+    ['object metadata error', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', metadataError: {} }] }],
+    ['unknown metadata status', 'installed', { ok: true, plugins: [{ id: 'bad', name: 'bad', metadataStatus: 'broken' }] }],
+    ['object error', 'installed', { ok: false, error: { message: 'bad' } }],
+    ['truthy nonboolean ok', 'installed', { ok: 'true', plugins: [] }],
+    ['array response', 'installed', []],
+    ['object owner', 'catalog', { ...catalog('bad'), plugins: [{ name: 'bad', owner: {} }] }],
+    ['object category', 'catalog', { ...catalog('bad'), plugins: [{ name: 'bad', owner: 'test', category: {} }] }],
+    ['array categories', 'catalog', { ...catalog('bad'), categories: [] }],
+    ['null categories', 'catalog', { ...catalog('bad'), categories: null }],
+    ['object category label', 'catalog', { ...catalog('bad'), categories: { tools: { zh: {} } } }],
+    ['array category entry', 'catalog', { ...catalog('bad'), categories: { tools: [] } }],
+    ['null category entry', 'catalog', { ...catalog('bad'), categories: { tools: null } }],
+    ['object updated', 'catalog', { ...catalog('bad'), updated: {} }],
+    ['infinite stars', 'catalog', { ...catalog('bad'), plugins: [{ name: 'bad', owner: 'test', stars: Infinity }] }],
+    ['object downloads', 'catalog', { ...catalog('bad'), plugins: [{ name: 'bad', owner: 'test', downloads: {} }] }],
+    ['object url', 'catalog', { ...catalog('bad'), plugins: [{ name: 'bad', owner: 'test', url: {} }] }],
+    ['invalid total', 'catalog', { ...catalog('bad'), total: -1 }],
+    ['invalid limit', 'catalog', { ...catalog('bad'), limit: 0 }],
+    ['invalid page', 'catalog', { ...catalog('bad'), page: 1.5 }],
+  ];
+  for (const [label, view, response] of cases) await t.test(label, async () => {
+    const client = view === 'catalog' ? await openCatalog() : await mountClient();
+    const index = view === 'catalog' ? (client.click('刷新'), 2) : 0;
+    await client.settle(index, response);
+    assert.match(client.meta(), /加载失败.*格式无效/);
+    assert.deepEqual(client.cards(), []);
+    assert.equal(client.empty(), '加载失败，请刷新重试');
+  });
+});
+
+test('local metadata diagnostics preserve real Host lifecycle status', async () => {
+  const client = await mountClient();
+  await client.settle(0, { ok: true, plugins: [
+    { id: 'ok', name: 'ok', loaded: true, statusText: 'Host 运行中', metadataStatus: 'ok', metadataError: '' },
+    { id: 'missing', name: 'missing', loaded: true, statusText: 'Host 运行中', metadataStatus: 'missing', metadataError: 'package.json 不存在' },
+    { id: 'invalid', name: 'invalid', loaded: false, statusText: '已禁用', metadataStatus: 'invalid', metadataError: 'package.json 格式无效' },
+    { id: 'unreadable', name: 'unreadable', loaded: false, statusText: '未加载', metadataStatus: 'unreadable', metadataError: 'EACCES' },
+  ] });
+  assert.deepEqual(client.labels(), ['Host 运行中', 'Host 运行中', '已禁用', '未加载']);
+  assert.deepEqual(client.descriptions(), [
+    '元数据缺失：package.json 不存在', '元数据无效：package.json 格式无效', '元数据无法读取：EACCES',
+  ]);
+});
+
+test('valid bilingual categories and finite metrics remain renderable with optional fields omitted', async () => {
+  const client = await openCatalog();
+  client.click('刷新');
+  await client.settle(2, { ...catalog('valid'), categories: { tools: { zh: '工具', en: 'Tools' } }, plugins: [
+    { name: 'valid', owner: 'test', category: 'tools', stars: 2, downloads: null },
+  ] });
+  assert.deepEqual(client.cards(), ['valid']);
+  assert.deepEqual(client.labels(), ['test', '★ 2', '工具']);
+});
+
+async function openSecondPage() {
+  const client = await openCatalog();
+  client.search('retained query');
+  await client.settle(2, { ...catalog('query result'), total: 81 });
+  client.select('插件分类', 'tools');
+  await client.settle(3, { ...catalog('category result'), total: 81 });
+  client.select('排序方式', 'name');
+  await client.settle(4, { ...catalog('sort result'), total: 81 });
+  client.click('下一页');
+  await client.settle(5, { ...catalog('old page two'), total: 81, page: 2 });
+  assert.equal(client.page(), '第 2 页');
+  return client;
+}
+
+test('refresh shrink actually requests and displays the corrected page with all filters retained', async () => {
+  const client = await openSecondPage();
+  client.click('刷新');
+  const refresh = new URL(client.requests[6].url, 'http://local').searchParams;
+  assert.equal(refresh.get('refresh'), '1');
+  assert.equal(refresh.get('page'), '2');
+  await client.settle(6, { ...catalog('unused'), plugins: [], total: 1, page: 2 });
+  assert.equal(client.requests.length, 8, 'shrinking total must trigger a real corrected-page request');
+  const corrected = new URL(client.requests[7].url, 'http://local').searchParams;
+  assert.equal(corrected.get('page'), '1');
+  assert.equal(corrected.get('q'), 'retained query');
+  assert.equal(corrected.get('category'), 'tools');
+  assert.equal(corrected.get('sort'), 'name');
+  assert.equal(client.meta(), '加载中…');
+  assert.deepEqual(client.cards(), []);
+  await client.settle(7, { ...catalog('real corrected page'), page: 1 });
+  assert.equal(client.page(), '第 1 页');
+  assert.deepEqual(client.cards(), ['real corrected page']);
+});
+
+test('zero total shrink returns to page one and settles as a genuine empty result', async () => {
+  const client = await openSecondPage();
+  client.click('刷新');
+  await client.settle(6, { ...catalog('unused'), plugins: [], total: 0, page: 2 });
+  assert.equal(client.requests.length, 8);
+  await client.settle(7, { ...catalog('unused'), plugins: [], total: 0, page: 1 });
+  assert.equal(client.page(), '第 1 页');
+  assert.equal(client.empty(), '没有匹配的插件');
+  assert.equal(client.requests.length, 8, 'page-one empty response must not cause a reload loop');
+});
+
+test('corrected-page failure is visible instead of preserving a false empty success', async () => {
+  const client = await openSecondPage();
+  client.click('刷新');
+  await client.settle(6, { ...catalog('unused'), plugins: [], total: 1, page: 2 });
+  assert.equal(client.requests.length, 8);
+  await client.settle(7, null, Error('corrected request failed'));
+  assert.match(client.meta(), /corrected request failed/);
+  assert.equal(client.empty(), '加载失败，请刷新重试');
+});
+
+test('a late corrected-page success or failure cannot replace a newer query', async t => {
+  for (const error of [null, Error('obsolete correction error')]) await t.test(error ? 'failure' : 'success', async () => {
+    const client = await openSecondPage();
+    client.click('刷新');
+    await client.settle(6, { ...catalog('unused'), plugins: [], total: 1, page: 2 });
+    assert.equal(client.requests.length, 8);
+    client.search('new query');
+    assert.equal(client.requests[7].options.signal.aborted, true);
+    await client.settle(8, catalog('new result'));
+    await client.settle(7, catalog('obsolete corrected result'), error);
+    assert.equal(client.query(), 'new query');
+    assert.deepEqual(client.cards(), ['new result']);
+    assert.doesNotMatch(client.meta(), /obsolete/);
+  });
 });

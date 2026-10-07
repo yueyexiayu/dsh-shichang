@@ -304,6 +304,148 @@ test("preset bare modules use package identity only with a confirmed resolution 
   assert.equal(result.body.plugins[0].references.filter(row => row.pathConfirmed).length, 1);
 });
 
+test("invalid catalog pagination returns 400 before fetching upstream", async (t) => {
+  const f = await fixture(t);
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json({ plugins: [] }); };
+  for (const [key, values] of Object.entries({
+    page: ["Infinity", "NaN", "1.5", "0", "-2", "9007199254740992", "", " ", "no"],
+    limit: ["Infinity", "NaN", "1.5", "0", "-2", "101", "", " ", "no"],
+  })) {
+    for (const value of values) {
+      const result = await f.request(`action=catalog&refresh=1&${key}=${encodeURIComponent(value)}`);
+      assert.equal(result.status, 400, `${key}=${JSON.stringify(value)}`);
+      assert.equal(result.body.ok, false);
+      assert.match(result.body.error, new RegExp(key));
+    }
+  }
+  assert.equal(calls, 0);
+  const valid = await f.request(`action=catalog&page=${Number.MAX_SAFE_INTEGER}&limit=100`);
+  assert.equal(valid.status, 200);
+  assert.equal(valid.body.page, Number.MAX_SAFE_INTEGER);
+  assert.equal(valid.body.limit, 100);
+});
+
+test("catalog validates every row and envelope before caching, with no silent omissions", async (t) => {
+  const f = await fixture(t);
+  const malformed = [
+    null, [], { plugins: null }, { plugins: [null] }, { plugins: [1] }, { plugins: [[]] },
+    { plugins: [{ name: "" }] }, { plugins: [{ name: "  " }] }, { plugins: [{ name: {} }] },
+    { plugins: [{ name: "good" }, { name: "bad", description: { zh: {} } }] },
+    { plugins: [{ name: "bad", description: [] }] }, { plugins: [{ name: "bad", description: 7 }] },
+    ...["owner", "url", "page", "category", "version", "npm", "install", "added"].map(key => ({ plugins: [{ name: "bad", [key]: {} }] })),
+    ...["stars", "downloads"].flatMap(key => ["NaN", "Infinity", "", true, {}, []].map(value => ({ plugins: [{ name: "bad", [key]: value }] }))),
+    { plugins: [], url: {} }, { plugins: [], updated: [] },
+    ...["NaN", -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "-1", "1.5", "9007199254740992"].map(count => ({ plugins: [], count })),
+    { plugins: [], categories: [] }, { plugins: [], categories: { ui: "interface" } },
+    { plugins: [], categories: { ui: { zh: {} } } }, { plugins: [], categories: { ui: { en: 1 } } },
+  ];
+  let payload;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; return Response.json(payload); };
+  for (const invalid of malformed) {
+    payload = invalid;
+    const result = await f.request("action=catalog&refresh=1");
+    assert.equal(result.status, 502, JSON.stringify(invalid));
+    assert.equal(result.body.ok, false);
+    assert.match(result.body.error, /目录/);
+    payload = { plugins: [{ name: "recovered" }] };
+    const recovered = await f.request("action=catalog");
+    assert.equal(recovered.status, 200, JSON.stringify(invalid));
+    assert.equal(recovered.body.plugins[0].name, "recovered");
+  }
+  assert.equal(calls, malformed.length + 1);
+});
+
+test("bad refresh preserves verified cache but returns an explicit current failure", async (t) => {
+  const f = await fixture(t);
+  let payload = { plugins: [{ name: "verified", description: "Verified description" }] };
+  globalThis.fetch = async () => Response.json(payload);
+  assert.equal((await f.request("action=catalog&q=verified")).status, 200);
+  payload = { plugins: [{ name: "poison", owner: {} }] };
+  const failure = await f.request("action=catalog&refresh=1");
+  assert.equal(failure.status, 502);
+  assert.equal(failure.body.ok, false);
+  const cached = await f.request("action=catalog&q=verified");
+  assert.equal(cached.status, 200);
+  assert.equal(cached.body.plugins[0].name, "verified");
+});
+
+test("catalog accepts nullable text, bilingual descriptions and finite numeric strings", async (t) => {
+  const f = await fixture(t);
+  globalThis.fetch = async () => Response.json({ url: null, updated: null, count: "2", categories: { ui: { zh: "界面", en: "UI" } }, plugins: [
+    { name: "null-text", description: null, owner: null, version: null, stars: "2", downloads: "3", category: "ui" },
+    { name: "translated", description: { zh: "中文", en: "English" }, stars: "1" },
+  ] });
+  const all = await f.request("action=catalog");
+  assert.equal(all.status, 200);
+  assert.equal(all.body.count, 2);
+  assert.equal(all.body.updated, "");
+  assert.equal(all.body.plugins[0].owner, "");
+  assert.equal(all.body.plugins[0].stars, 2);
+  assert.equal(all.body.plugins[0].downloads, 3);
+  assert.deepEqual(all.body.categories.ui, { zh: "界面", en: "UI" });
+  assert.equal((await f.request("action=catalog&q=English")).body.plugins[0].name, "translated");
+  assert.equal((await f.request("action=catalog&q=null-text")).body.plugins[0].description, "");
+});
+
+test("installed package errors expose diagnostics without hiding runtime or healthy peers", async (t) => {
+  const ids = ["missing", "json", "shape", "fields", "unreadable", "healthy"];
+  const f = await fixture(t, { entries: ids.map(id => ({ entryId: id, moduleName: `../../plugins/${id}/lib/index.js`, enabled: true, fiberPhase: "active" })) });
+  const dirs = {};
+  for (const id of ids) dirs[id] = await f.plugin(id);
+  await fs.unlink(path.join(dirs.missing, "package.json"));
+  await fs.writeFile(path.join(dirs.json, "package.json"), "{ invalid JSON");
+  await fs.writeFile(path.join(dirs.shape, "package.json"), "[]");
+  await fs.writeFile(path.join(dirs.fields, "package.json"), JSON.stringify({ name: {}, version: "2.0", description: [] }));
+  const originalRead = fs.readFile;
+  fs.readFile = async (file, ...args) => {
+    if (file === path.join(dirs.unreadable, "package.json")) throw Object.assign(new Error("fixture denied"), { code: "EACCES" });
+    return originalRead(file, ...args);
+  };
+  t.after(() => { fs.readFile = originalRead; });
+  const result = await f.request();
+  assert.equal(result.status, 200);
+  assert.equal(result.body.plugins.length, ids.length);
+  const byId = Object.fromEntries(result.body.plugins.map(item => [item.id, item]));
+  for (const [id, expected] of Object.entries({ missing: "missing", json: "invalid", shape: "invalid", fields: "invalid", unreadable: "unreadable", healthy: "ok" })) {
+    const item = byId[id];
+    assert.equal(item.metadataStatus, expected, id);
+    assert.equal(typeof item.metadataError, "string");
+    assert.equal(Boolean(item.metadataError), expected !== "ok");
+    for (const key of ["name", "version", "description"]) assert.equal(typeof item[key], "string", `${id}.${key}`);
+    assert.equal(item.loaded, true, id);
+    assert.equal(item.statusText, "Host 运行中", id);
+    assert.equal(item.references[0].fiberPhase, "active", id);
+  }
+  assert.equal(byId.fields.name, "fields");
+  assert.equal(byId.fields.version, "2.0");
+  assert.equal(byId.fields.description, "");
+  assert.match(byId.fields.metadataError, /name.*description/);
+  assert.match(byId.unreadable.metadataError, /EACCES/);
+});
+
+test("installed package structure and optional string fields are validated", async (t) => {
+  const f = await fixture(t);
+  const dir = await f.plugin("changing");
+  const file = path.join(dir, "package.json");
+  for (const pkg of [null, [], 1, "text", true, {}, { name: "" }, { name: " " }, { name: "valid", version: {} }, { name: "valid", description: 1 }]) {
+    await fs.writeFile(file, JSON.stringify(pkg));
+    const item = (await f.request()).body.plugins[0];
+    assert.equal(item.metadataStatus, "invalid", JSON.stringify(pkg));
+    assert.ok(item.metadataError);
+    assert.equal(typeof item.name, "string");
+    assert.equal(typeof item.version, "string");
+    assert.equal(typeof item.description, "string");
+  }
+  await fs.writeFile(file, JSON.stringify({ name: "valid", version: null, description: null }));
+  const item = (await f.request()).body.plugins[0];
+  assert.equal(item.metadataStatus, "ok");
+  assert.equal(item.metadataError, "");
+  assert.equal(item.version, "");
+  assert.equal(item.description, "");
+});
+
 test("real official Cordis Context and Loader serve installed inventory", { skip: !process.env.DSH_SOURCE_DIR }, async (t) => {
   const f = await fixture(t);
   const source = process.env.DSH_SOURCE_DIR;
