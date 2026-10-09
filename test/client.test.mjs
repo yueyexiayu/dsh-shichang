@@ -41,10 +41,23 @@ async function mountClient() {
     },
   };
   let exports;
+  const timers = new Map();
+  let timerSeq = 0;
+  function flush(max) {
+    const due = [...timers.entries()].filter(([, timer]) => timer.ms <= max);
+    for (const [id] of due) timers.delete(id);
+    for (const [, timer] of due) timer.fn();
+  }
   const sandbox = {
     React, URLSearchParams, AbortController,
     window: { __ModuleLoader__: { load(spec) { exports = spec.factory(() => React); } } },
     document: { getElementById() { return null; }, createElement() { return {}; }, head: { appendChild() {} } },
+    setTimeout(fn, ms) {
+      const id = ++timerSeq;
+      timers.set(id, { fn, ms: ms || 0 });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
     fetch(url, options = {}) {
       return new Promise((resolve, reject) => requests.push({ url, options, resolve, reject }));
     },
@@ -73,7 +86,8 @@ async function mountClient() {
   }
   function button(label) { return all(x => x.type === 'button' && x.children.includes(label))[0]; }
   function click(label) { button(label).props.onClick(); commit(); }
-  function search(value) { all(x => x.type === 'input')[0].props.onChange({ target: { value } }); commit(); }
+  function type(value) { all(x => x.type === 'input')[0].props.onChange({ target: { value } }); commit(); }
+  function search(value) { type(value); flush(250); commit(); }
   function select(label, value) { all(x => x.type === 'select' && x.props['aria-label'] === label)[0].props.onChange({ target: { value } }); commit(); }
   async function settle(i, body, error) {
     if (error) requests[i].reject(error);
@@ -83,7 +97,8 @@ async function mountClient() {
   }
   commit();
   return {
-    requests, click, search, select, settle,
+    requests, click, search, type, select, settle,
+    flush() { flush(250); commit(); },
     page: () => all(x => x.type === 'span').flatMap(x => x.children).find(x => typeof x === 'string' && /^第 \d+ 页$/.test(x)),
     empty: () => all(x => x.props.className === 'sc-empty')[0]?.children.join(''),
     cards: () => all(x => x.props.className === 'sc-name').map(x => x.children[0]),
@@ -103,6 +118,19 @@ async function openCatalog() {
   await client.settle(1, catalog('baseline'));
   return client;
 }
+
+test('typing keeps the current list until the debounced search starts', async () => {
+  const client = await openCatalog();
+  const before = client.requests.length;
+  client.type('a');
+  assert.equal(client.requests.length, before);
+  assert.deepEqual(client.cards(), ['baseline']);
+  assert.doesNotMatch(client.meta(), /加载中|正在更新/);
+  client.flush();
+  assert.equal(client.requests.length, before + 1);
+  assert.equal(client.meta(), '正在更新…');
+  assert.deepEqual(client.cards(), ['baseline']);
+});
 
 test('late search success cannot replace a newer completed search', async () => {
   const client = await openCatalog();
@@ -128,7 +156,8 @@ test('stale failure cannot clear loading or display an error for the latest sear
   const client = await openCatalog();
   client.search('old'); client.search('new');
   await client.settle(2, null, Error('obsolete network error'));
-  assert.equal(client.meta(), '加载中…');
+  assert.equal(client.meta(), '正在更新…');
+  assert.deepEqual(client.cards(), ['baseline']);
   await client.settle(3, catalog('new result'));
   assert.deepEqual(client.cards(), ['new result']);
   assert.doesNotMatch(client.meta(), /obsolete/);
@@ -297,8 +326,8 @@ test('refresh shrink actually requests and displays the corrected page with all 
   assert.equal(corrected.get('q'), 'retained query');
   assert.equal(corrected.get('category'), 'tools');
   assert.equal(corrected.get('sort'), 'name');
-  assert.equal(client.meta(), '加载中…');
-  assert.deepEqual(client.cards(), []);
+  assert.equal(client.meta(), '正在更新…');
+  assert.deepEqual(client.cards(), ['old page two']);
   await client.settle(7, { ...catalog('real corrected page'), page: 1 });
   assert.equal(client.page(), '第 1 页');
   assert.deepEqual(client.cards(), ['real corrected page']);
